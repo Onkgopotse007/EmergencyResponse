@@ -6,15 +6,22 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.media.VolumeProvider;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.telephony.SmsManager;
 import android.util.Log;
 import android.widget.Toast;
@@ -26,7 +33,7 @@ import androidx.core.content.ContextCompat;
 import java.util.ArrayList;
 
 @SuppressWarnings("ConstantConditions")
-public class AutoStartService extends Service {
+public class AutoStartService extends Service implements SensorEventListener {
     private static final String TAG = "Myservice";
     private MediaSession mediaSession;
     int cVolume = 50;
@@ -34,16 +41,121 @@ public class AutoStartService extends Service {
     Timer timer = new Timer();
     int keyPressed = 0;
     Context mContext;
+    DatabaseHelper myDB;
+    static Boolean isAlertRunning;
+    Vibrator vibrator;
+    SensorManager sensorManager;
+    Sensor accelerometerSensor;
+
+    boolean isAccelerometerSensorAvailable, itIsNotFirstTime = false;
+    float currentX, currentY, currentZ, lastX, lastY, lastZ, xDifference, yDifference, zDifference, shakeThreshold = 5f;
+    //String [] message;
     LocationManager locationManager;
     String userCurrLocation;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        mContext = this;
+        myDB = new DatabaseHelper(this);
+        shakeDetect();
+    }
+
     double longitude;
     double latitude;
-    String msg="";
-    int phoneIndex = 0;
-    static Boolean isAlertRunning;
 
-    //String [] message;
-    DatabaseHelper myDB;
+    int phoneIndex = 0;
+
+    String msg = "";
+
+    public void shakeDetect() {
+        ArrayList<String> phoneNo = new ArrayList<>();
+        vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        SensorEventListener sensorEventListener = new SensorEventListener() {
+            @Override
+            public void onSensorChanged(SensorEvent sensorEvent) {
+                if (sensorEvent != null) {
+                    System.out.println("sensorEvent not null");
+                    currentX = sensorEvent.values[0];
+                    currentY = sensorEvent.values[1];
+                    currentZ = sensorEvent.values[2];
+                    float floatSum = Math.abs(currentX) + Math.abs(currentY) + Math.abs(currentZ);
+
+                    if (currentX > 2 ||
+                            currentX < -2 ||
+                            currentY > 12 ||
+                            currentY < -12 ||
+                            currentZ > 2 ||
+                            currentZ < -2) {
+                        if (floatSum > 14) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                vibrator.vibrate(VibrationEffect.createOneShot(1000, VibrationEffect.DEFAULT_AMPLITUDE));
+                            } else {
+                                vibrator.vibrate(1000);
+                            }
+                            final Handler handler = new Handler();
+                            System.out.println("State of thread: " + isAlertRunning);
+
+                            funcGetLocation();
+                            System.out.println(msg);
+                            if (!msg.isEmpty()) {
+                                Cursor res = myDB.getData();
+                                if (res.getCount() == 0) {
+                                    Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
+                                    return;
+                                }
+                                while (res.moveToNext()) {
+                                    phoneNo.add(res.getString(1));
+                                    phoneIndex++;
+                                }
+                                for (int p = 0; p < phoneNo.size(); p++) {
+                                    sendSms(phoneNo.get(p), msg);
+                                }
+
+                            } else {
+                                Toast.makeText(AutoStartService.this, "Message is empty", Toast.LENGTH_SHORT).show();
+                            }
+
+                            final Runnable r = new Runnable() {
+
+                                @Override
+                                public void run() {
+                                    funcGetLocation();
+                                    System.out.println(msg);
+                                    if (!msg.isEmpty()) {
+                                        Cursor res = myDB.getData();
+                                        if (res.getCount() == 0) {
+                                            Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
+                                            return;
+                                        }
+                                        while (res.moveToNext()) {
+                                            phoneNo.add(res.getString(1));
+                                            phoneIndex++;
+                                        }
+                                        for (int p = 0; p < phoneNo.size(); p++) {
+                                            sendSms(phoneNo.get(p), msg);
+                                        }
+                                    } else {
+                                        System.out.println("Could not generate location");
+                                    }
+                                }
+                            };
+                            handler.postDelayed(r, 300000);
+                        }
+                    } else {
+                        System.out.println("Not vibrating");
+                    }
+                }
+            }
+
+            @Override
+            public void onAccuracyChanged(Sensor sensor, int i) {
+
+            }
+        };
+        sensorManager.registerListener(sensorEventListener, accelerometerSensor, SensorManager.SENSOR_DELAY_NORMAL);
+    }
 
     public void funcGetLocation() {
 
@@ -82,36 +194,28 @@ public class AutoStartService extends Service {
                 }
             };
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 0, 0, locationListener);
-            locationManager.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER,0,0,locationListener);
+            locationManager.requestLocationUpdates(LocationManager.PASSIVE_PROVIDER, 0, 0, locationListener);
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
 
         }
 
     }
 
-    @Override
-    public void onCreate() {
-        super.onCreate();
-        mContext = this;
-        myDB = new DatabaseHelper(this);
-
-    }
-
     public void sendSms(String contactNumber, String mess) {
 
-            SmsManager smsManager = SmsManager.getDefault();
-            smsManager.sendTextMessage(contactNumber, null, mess, null, null);
-            System.out.println("Sending message");
+        SmsManager smsManager = SmsManager.getDefault();
+        smsManager.sendTextMessage(contactNumber, null, mess, null, null);
+        System.out.println("Sending message");
 
 
-            //System.out.println("following exception happens: "+ErrVar);
+        //System.out.println("following exception happens: "+ErrVar);
 
 
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startID) {
-
+        shakeDetect();
         ArrayList<String> phoneNo = new ArrayList<>();
         Toast.makeText(this, "My Service Started", Toast.LENGTH_LONG).show();
         Log.d(TAG, "onStart");
@@ -165,60 +269,61 @@ public class AutoStartService extends Service {
                             timer.stop();
                             keyPressed = 0;
                             totalTime = 0;
+                            startService(new Intent(AutoStartService.this, AutoStartService.class));
                         }
                         //if volume button is clicked 3 times print to console or put the time logic/if statement needed//ideal time between clicks is 300-500ms
                         if (keyPressed == 3 && totalTime >= 300 && totalTime <= 550) {
                             timer.stop();
                             totalTime += timer.getElapsedMilliseconds();
                             final Handler handler = new Handler();
-                            System.out.println("State of thread: "+isAlertRunning);
+                            System.out.println("State of thread: " + isAlertRunning);
 
-                                funcGetLocation();funcGetLocation();
-                                System.out.println(msg);
-                                if (!msg.isEmpty()) {
-                                    Cursor res = myDB.getData();
-                                    if (res.getCount() == 0) {
-                                        Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
-                                        return;
-                                    }
-                                    while (res.moveToNext()) {
-                                        phoneNo.add(res.getString(1));
-                                        phoneIndex++;
-                                    }
-                                    for (int p = 0; p < phoneNo.size(); p++) {
-                                        sendSms(phoneNo.get(p), msg);
-                                    }
-
-                                } else {
-                                    Toast.makeText(AutoStartService.this, "Message is empty", Toast.LENGTH_SHORT).show();
+                            funcGetLocation();
+                            System.out.println(msg);
+                            if (!msg.isEmpty()) {
+                                Cursor res = myDB.getData();
+                                if (res.getCount() == 0) {
+                                    Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
+                                    return;
                                 }
-                                startActivity(new Intent(AutoStartService.this, StopAlert.class).setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK|Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_REORDER_TO_FRONT|Intent.FLAG_ACTIVITY_SINGLE_TOP).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER));
-                                final Runnable r = new Runnable() {
+                                while (res.moveToNext()) {
+                                    phoneNo.add(res.getString(1));
+                                    phoneIndex++;
+                                }
+                                for (int p = 0; p < phoneNo.size(); p++) {
+                                    sendSms(phoneNo.get(p), msg);
+                                }
 
-                                    @Override
-                                    public void run() {
-                                        funcGetLocation();funcGetLocation();
-                                        System.out.println(msg);
-                                        if (!msg.isEmpty()) {
-                                            Cursor res = myDB.getData();
-                                            if (res.getCount() == 0) {
-                                                Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
-                                                return;
-                                            }
-                                            while (res.moveToNext()) {
-                                                phoneNo.add(res.getString(1));
-                                                phoneIndex++;
-                                            }
-                                            for (int p = 0; p < phoneNo.size(); p++) {
-                                                sendSms(phoneNo.get(p), msg);
-                                            }
-                                        } else {
-                                            System.out.println("Could not generate location");
+                            } else {
+                                Toast.makeText(AutoStartService.this, "Message is empty", Toast.LENGTH_SHORT).show();
+                            }
+
+                            final Runnable r = new Runnable() {
+
+                                @Override
+                                public void run() {
+                                    funcGetLocation();
+                                    System.out.println(msg);
+                                    if (!msg.isEmpty()) {
+                                        Cursor res = myDB.getData();
+                                        if (res.getCount() == 0) {
+                                            Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
+                                            return;
                                         }
+                                        while (res.moveToNext()) {
+                                            phoneNo.add(res.getString(1));
+                                            phoneIndex++;
+                                        }
+                                        for (int p = 0; p < phoneNo.size(); p++) {
+                                            sendSms(phoneNo.get(p), msg);
+                                        }
+                                    } else {
+                                        System.out.println("Could not generate location");
                                     }
-                                };
-                                handler.postDelayed(r, 300000);
-
+                                }
+                            };
+                            handler.postDelayed(r, 300000);
+                            //startActivity(new Intent(AutoStartService.this, StopAlert.class).setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER));
 
                             //funcGetLocation();
                             System.out.println("Volume button pressed 3 times in " + totalTime + "milliseconds");
@@ -241,6 +346,82 @@ public class AutoStartService extends Service {
         return START_STICKY;
     }
 
+    @Override
+    public void onSensorChanged(SensorEvent event) {
+        ArrayList<String> phoneNo = new ArrayList<>();
+        currentX = event.values[0];
+        currentY = event.values[1];
+        currentZ = event.values[2];
+        if (itIsNotFirstTime) {
+            xDifference = Math.abs(lastX - currentX);
+            yDifference = Math.abs(lastY - currentY);
+            zDifference = Math.abs(lastZ - currentZ);
+            if ((xDifference > shakeThreshold && yDifference > shakeThreshold) || (xDifference > shakeThreshold && zDifference > shakeThreshold) || (yDifference > shakeThreshold && zDifference > shakeThreshold)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(1000, VibrationEffect.DEFAULT_AMPLITUDE));
+                } else {
+                    vibrator.vibrate(1000);
+                }
+                final Handler handler = new Handler();
+                System.out.println("State of thread: " + isAlertRunning);
+
+                funcGetLocation();
+                System.out.println(msg);
+                if (!msg.isEmpty()) {
+                    Cursor res = myDB.getData();
+                    if (res.getCount() == 0) {
+                        Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    while (res.moveToNext()) {
+                        phoneNo.add(res.getString(1));
+                        phoneIndex++;
+                    }
+                    for (int p = 0; p < phoneNo.size(); p++) {
+                        sendSms(phoneNo.get(p), msg);
+                    }
+
+                } else {
+                    Toast.makeText(AutoStartService.this, "Message is empty", Toast.LENGTH_SHORT).show();
+                }
+
+                final Runnable r = new Runnable() {
+
+                    @Override
+                    public void run() {
+                        funcGetLocation();
+                        System.out.println(msg);
+                        if (!msg.isEmpty()) {
+                            Cursor res = myDB.getData();
+                            if (res.getCount() == 0) {
+                                Toast.makeText(AutoStartService.this, "No Data exists", Toast.LENGTH_SHORT).show();
+                                return;
+                            }
+                            while (res.moveToNext()) {
+                                phoneNo.add(res.getString(1));
+                                phoneIndex++;
+                            }
+                            for (int p = 0; p < phoneNo.size(); p++) {
+                                sendSms(phoneNo.get(p), msg);
+                            }
+                        } else {
+                            System.out.println("Could not generate location");
+                        }
+                    }
+                };
+                handler.postDelayed(r, 300000);
+            }
+        }
+        lastX = currentX;
+        lastY = currentY;
+        lastZ = currentZ;
+        itIsNotFirstTime = true;
+    }
+
+    @Override
+    public void onAccuracyChanged(Sensor sensor, int accuracy) {
+
+    }
 
     @Override
     public IBinder onBind(Intent intent) {
